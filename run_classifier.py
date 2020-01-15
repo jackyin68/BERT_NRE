@@ -318,23 +318,23 @@ def create_model(bert_config, is_training, use_pcnn,
     )
 
     output_layer = model.get_sequence_output()
-    output_layer = tf.concat(output_layer, position1, axis=-1)
-    output_layer = tf.concat(output_layer, position2, axis=-1)
-    word_embedding_size = output_layer.shape[-1].value
+    # output_layer = tf.concat(output_layer, tf.reshape(position1,[position1.shape[0],FLAGS.max_seq_length,1]), axis=1)
+    # output_layer = tf.concat(output_layer, tf.reshape(position2,[position2.shape[0],FLAGS.max_seq_length,1]), axis=1)
+    # word_embedding_size = output_layer.shape[-1].value
 
-    head_embedding = bert.get_head_embedding()
-    tail_embedding = bert.get_tail_embedding()
+    head_embedding = model.get_head_embedding()
+    tail_embedding = model.get_tail_embedding()
 
     neg_head_embedding = tf.random_shuffle(head_embedding)
     neg_tail_embedding = tf.random_shuffle(tail_embedding)
 
     sentence_embedding = None
     if use_pcnn:
-        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, word_embedding_size, True)
+        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, True)
     else:
-        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, word_embedding_size, False)
+        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, False)
 
-    output_weights = tf.get_variable("output_weights", [num_labels, word_embedding_size],
+    output_weights = tf.get_variable("output_weights", [num_labels,bert_config.hidden_size ],
                                      initializer=tf.truncated_normal_initializer(stddev=0.02))
     output_bias = tf.get_variable("output_bias", [num_labels],
                                   initializer=tf.zeros_initializer())
@@ -441,7 +441,10 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
     assert len(position2_ids) == max_seq_length
     assert len(segment_mask) == max_seq_length
 
-    label_id = label_map[example.label.strip()]
+    if example.label.strip() in label_map.keys():
+        label_id = label_map[example.label.strip()]
+    else:
+        label_id = label_map["NA"]
     if ex_index < 5:
         tf.logging.info("*** Example ***")
         tf.logging.info("guid: %s" % (example.guid))
@@ -470,8 +473,8 @@ def file_based_input_fn_builder(input_file, seq_length, is_training, drop_remain
     name_to_features = {
         "input_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
-        "head_ids": tf.FixedLenFeature([seq_length], tf.int64),
-        "tail_ids": tf.FixedLenFeature([seq_length], tf.int64),
+        "head_ids": tf.FixedLenFeature([1], tf.int64),
+        "tail_ids": tf.FixedLenFeature([1], tf.int64),
         "position1_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "position2_ids": tf.FixedLenFeature([seq_length], tf.int64),
         "segment_mask": tf.FixedLenFeature([seq_length], tf.int64),
@@ -580,8 +583,8 @@ def main(_):
 
     if FLAGS.do_train:
         train_file = os.path.join(FLAGS.data_dir, "train.tf_record")
-        file_based_convert_examples_to_features(
-            train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
+        # file_based_convert_examples_to_features(
+        #     train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
         tf.logging.info("***** Running training *****")
         tf.logging.info("  Num examples = %d", len(train_examples))
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
@@ -630,7 +633,7 @@ def main(_):
                 tf.logging.info("  %s = %s", key, str(result[key]))
                 writer.write("%s = %s\n" % (key, str(result[key])))
 
-        if FLAGS.do_predict:
+    if FLAGS.do_predict:
             predict_examples = data_loader.get_test_example(FLAGS.data_dir)
             num_actual_predict_examples = len(predict_examples)
             predict_file = os.path.join(FLAGS.data_dir, "predict.tf_record")

@@ -215,10 +215,11 @@ class BertModel(object):
       self.tail_embeddings = []
       for i in range(batch_size):
           cur_sequence_output = tf.reshape(
+              # [batch_size, seq_length, hidden_Size]
               tf.slice(self.sequence_output, [i, 0, 0], [1, seq_length, config.hidden_size]),
               shape=[seq_length, config.hidden_size])
-          cur_head = tf.slice(head_ids, [i], [1])
-          cur_tail = tf.slice(tail_ids, [i], [1])
+          cur_head = tf.reshape(tf.slice(head_ids, [i,0], [1,1]),[-1])
+          cur_tail = tf.reshape(tf.slice(tail_ids, [i,0], [1,1]),[-1])
           self.head_embeddings.append(tf.nn.embedding_lookup(cur_sequence_output, cur_head))
           self.tail_embeddings.append(tf.nn.embedding_lookup(cur_sequence_output, cur_tail))
       self.head_embeddings = tf.concat(self.head_embeddings, axis=0)
@@ -268,7 +269,7 @@ class BertModel(object):
   def get_embedding_table(self):
     return self.embedding_table
 
-  def get_head_embeding(self):
+  def get_head_embedding(self):
       return  self.head_embeddings
   def get_tail_embedding(self):
       return self.tail_embeddings

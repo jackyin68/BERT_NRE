@@ -72,9 +72,9 @@ def birnn(x, length, hidden_size=230, cell_name='lstm', var_scope=None, keep_pro
         return tf.concat([fw_states, bw_states], axis=1)
 
 
-def sentence_encoder(x,mask,is_trainIng,word_embed_size,pcnn=True):
+def sentence_encoder(x,mask,is_trainIng,word_embed_size,is_pcnn=True):
     sentence_embedding = None
-    if pcnn:
+    if is_pcnn:
         if is_trainIng:
             sentence_embedding = pcnn(x,mask,keep_prob=0.5)
         else:
@@ -84,9 +84,9 @@ def sentence_encoder(x,mask,is_trainIng,word_embed_size,pcnn=True):
             sentence_embedding = cnn(x,mask,keep_prob=0.5)
         else:
             sentence_embedding = cnn(x,mask)
-    weight = tf.get_variable("trans weight",[230,word_embed_size],
+    weight = tf.get_variable("trans_weight",[690,word_embed_size],
                              initializer=tf.truncated_normal_initializer(stddev=0.02))
-    bias = tf.get_variable("trans bias",[word_embed_size],initializer=tf.zeros_initializer())
+    bias = tf.get_variable("trans_bias",[word_embed_size],initializer=tf.zeros_initializer())
     sentence_embedding = tf.matmul(sentence_embedding,weight)
     sentence_embedding= tf.nn.bias_add(sentence_embedding,bias)
     return sentence_embedding
