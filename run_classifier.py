@@ -1,7 +1,7 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
+import numpy as np
 import collections
 import csv
 import os
@@ -52,12 +52,12 @@ flags.DEFINE_integer(
     "Sequences longer than this will be truncated, and sequences shorter "
     "than this will be padded.")
 
-# flags.DEFINE_integer(
-#     "max_position_length", 512,
-#     "The max position embedding length"
-# )
+flags.DEFINE_float(
+    "margin", 1.0,
+    "The max position embedding length"
+)
 
-flags.DEFINE_bool("use_pcnn", True, "Whether to use PCNN")
+flags.DEFINE_bool("use_pcnn", False, "Whether to use PCNN")
 
 flags.DEFINE_bool("do_train", True, "Whether to run training.")
 
@@ -258,8 +258,7 @@ def model_fn_builder(
 
         if mode == tf.estimator.ModeKeys.TRAIN:
 
-            train_op = optimization.create_optimizer(total_loss, learning_rate, num_train_steps, num_warmup_steps,
-                                                     use_tpu)
+            train_op = optimization.create_optimizer(total_loss, learning_rate, num_train_steps, num_warmup_steps,use_tpu)
 
             output_spec = tf.contrib.tpu.TRUEstimatorSpec(
                 mode=mode,
@@ -325,16 +324,31 @@ def create_model(bert_config, is_training, use_pcnn,
     head_embedding = model.get_head_embedding()
     tail_embedding = model.get_tail_embedding()
 
-    neg_head_embedding = tf.random_shuffle(head_embedding)
-    neg_tail_embedding = tf.random_shuffle(tail_embedding)
+    # neg_head_embedding = tf.random_shuffle(head_embedding)
+    # neg_tail_embedding = tf.random_shuffle(tail_embedding)
 
-    sentence_embedding = None
+    # [batch_size, hidden_size]
+    sentence_embedding = tf.layers.conv1d(inputs=output_layer,
+                                          filters=bert_config.hidden_size,
+                                          kernel_size=3,
+                                          strides=1,
+                                          padding="same",
+                                          kernel_initializer=tf.contrib.layers.xavier_initializer())
     if use_pcnn:
-        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, True)
+        mask_embedding = tf.constant([[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1]], dtype=np.float32)
+        mask = tf.nn.embedding_lookup(mask_embedding,segment_mask)
+        sentence_embedding = tf.reduce_max(tf.expand_dims(mask*100,2)+tf.expand_dims(sentence_embedding,3),axis=1) - 100
+        return tf.reshape(sentence_embedding,[-1,bert_config.hidden_size*3])
     else:
-        sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, False)
+        sentence_embedding = tf.reduce_max(sentence_embedding,axis=-2)
+    # if use_pcnn:
+    #     sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, True)
+    # else:
+    #     sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, False)
 
-    output_weights = tf.get_variable("output_weights", [num_labels,bert_config.hidden_size ],
+
+
+    output_weights = tf.get_variable("output_weights", [num_labels,bert_config.hidden_size],
                                      initializer=tf.truncated_normal_initializer(stddev=0.02))
     output_bias = tf.get_variable("output_bias", [num_labels],
                                   initializer=tf.zeros_initializer())
@@ -342,11 +356,13 @@ def create_model(bert_config, is_training, use_pcnn,
     with tf.variable_scope("loss"):
         if is_training:
             sentence_embedding = tf.nn.dropout(sentence_embedding, keep_prob=0.9)
+        pos = tf.add(head_embedding,tail_embedding)
+        pos = abs(tf.add(pos,-sentence_embedding))
+        pos = tf.reduce_sum(pos, axis=1, keep_dims=True)
+        # neg = tf.reduce_sum(abs(neg_head_embedding + tail_embedding - sentence_embedding), axis=1, keep_dims=True)
 
-        pos = tf.reduce_sum(abs(head_embedding + tail_embedding - sentence_embedding), axis=1, keep_dims=True)
-        neg = tf.reduce_sum(abs(neg_head_embedding + tail_embedding - sentence_embedding), axis=1, keep_dims=True)
-
-        per_trans_loss = tf.maximum(pos - neg + FLAGS.margin, 0)
+        # per_trans_loss = tf.maximum(pos - neg + FLAGS.margin, 0)
+        per_trans_loss = tf.maximum(pos + FLAGS.margin, 0)
         total_trans_loss = tf.reduce_mean(per_trans_loss)
 
         logits = tf.matmul(sentence_embedding, output_weights, transpose_b=True)
@@ -413,8 +429,9 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
 
     def get_entity_pos(entity):
         ids = 0
+        entity = entity.split(" ")
         for i, word in enumerate(final_tokens):
-            if word == entity:
+            if word == entity[0]:
                 ids = i
                 break
         return ids
