@@ -4,7 +4,7 @@ export GLUE_DIR=/home/lei/PycharmProjects/BERT_NRE
 python3 run_classifier.py \
   --do_train=True \
   --do_eval=False \
-  --data_dir=$GLUE_DIR/data/OpenNRE/ \
+  --data_dir=$GLUE_DIR/data/nyt10/ \
   --vocab_file=$BERT_BASE_DIR/vocab.txt \
   --bert_config_file=$BERT_BASE_DIR/bert_config.json \
   --init_checkpoint=$BERT_BASE_DIR/bert_model.ckpt \

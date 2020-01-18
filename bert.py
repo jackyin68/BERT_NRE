@@ -1,19 +1,3 @@
-# coding=utf-8
-# Copyright 2018 The Google AI Language Team Authors.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
-"""The main BERT model and related functions."""
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
@@ -105,28 +89,6 @@ class BertConfig(object):
 
 
 class BertModel(object):
-  """BERT model ("Bidirectional Encoder Representations from Transformers").
-
-  Example usage:
-
-  ```python
-  # Already been converted into WordPiece token ids
-  input_ids = tf.constant([[31, 51, 99], [15, 5, 0]])
-  input_mask = tf.constant([[1, 1, 1], [1, 1, 0]])
-  token_type_ids = tf.constant([[0, 0, 1], [0, 2, 0]])
-
-  config = modeling.BertConfig(vocab_size=32000, hidden_size=512,
-    num_hidden_layers=8, num_attention_heads=6, intermediate_size=1024)
-
-  model = modeling.BertModel(config=config, is_training=True,
-    input_ids=input_ids, input_mask=input_mask, token_type_ids=token_type_ids)
-
-  label_embeddings = tf.get_variable(...)
-  pooled_output = model.get_pooled_output()
-  logits = tf.matmul(pooled_output, label_embeddings)
-  ...
-  ```
-  """
 
   def __init__(self,
                config,
@@ -137,23 +99,7 @@ class BertModel(object):
                tail_ids=None,
                use_one_hot_embeddings=False,
                scope=None):
-    """Constructor for BertModel.
 
-    Args:
-      config: `BertConfig` instance.
-      is_training: bool. true for training model, false for eval model. Controls
-        whether dropout will be applied.
-      input_ids: int32 Tensor of shape [batch_size, seq_length].
-      input_mask: (optional) int32 Tensor of shape [batch_size, seq_length].
-      token_type_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
-      use_one_hot_embeddings: (optional) bool. Whether to use one-hot word
-        embeddings or tf.embedding_lookup() for the word embeddings.
-      scope: (optional) variable scope. Defaults to "bert".
-
-    Raises:
-      ValueError: The config is invalid or one of the input tensor shapes
-        is invalid.
-    """
     config = copy.deepcopy(config)
     if not is_training:
       config.hidden_dropout_prob = 0.0
@@ -168,7 +114,6 @@ class BertModel(object):
 
     with tf.variable_scope(scope, default_name="bert"):
       with tf.variable_scope("embeddings"):
-        # Perform embedding lookup on the word ids.
         (self.embedding_output, self.embedding_table) = embedding_lookup(
             input_ids=input_ids,
             vocab_size=config.vocab_size,
@@ -177,8 +122,6 @@ class BertModel(object):
             word_embedding_name="word_embeddings",
             use_one_hot_embeddings=use_one_hot_embeddings)
 
-        # Add positional embeddings and token type embeddings, then layer
-        # normalize and perform dropout.
         self.embedding_output = embedding_postprocessor(
             input_tensor=self.embedding_output,
             use_position_embeddings=True,
@@ -188,14 +131,9 @@ class BertModel(object):
             dropout_prob=config.hidden_dropout_prob)
 
       with tf.variable_scope("encoder"):
-        # This converts a 2D mask of shape [batch_size, seq_length] to a 3D
-        # mask of shape [batch_size, seq_length, seq_length] which is used
-        # for the attention scores.
         attention_mask = create_attention_mask_from_input_mask(
             input_ids, input_mask)
 
-        # Run the stacked transformer.
-        # `sequence_output` shape = [batch_size, seq_length, hidden_size].
         self.all_encoder_layers = transformer_model(
             input_tensor=self.embedding_output,
             attention_mask=attention_mask,
@@ -215,7 +153,6 @@ class BertModel(object):
       self.tail_embeddings = []
       for i in range(batch_size):
           cur_sequence_output = tf.reshape(
-              # [batch_size, seq_length, hidden_Size]
               tf.slice(self.sequence_output, [i, 0, 0], [1, seq_length, config.hidden_size]),
               shape=[seq_length, config.hidden_size])
           cur_head = tf.reshape(tf.slice(head_ids, [i,0], [1,1]),[-1])
@@ -224,15 +161,12 @@ class BertModel(object):
           self.tail_embeddings.append(tf.nn.embedding_lookup(cur_sequence_output, cur_tail))
       self.head_embeddings = tf.concat(self.head_embeddings, axis=0)
       self.tail_embeddings = tf.concat(self.tail_embeddings, axis=0)
+      self.neg_head_embeddings = tf.concat(self.head_embeddings[::-1],axis=0)
+      self.neg_tail_embeddings = tf.concat(self.tail_embeddings[::-1],axis=0)
 
-      # The "pooler" converts the encoded sequence tensor of shape
-      # [batch_size, seq_length, hidden_size] to a tensor of shape
-      # [batch_size, hidden_size]. This is necessary for segment-level
-      # (or segment-pair-level) classification tasks where we need a fixed
-      # dimensional representation of the segment.
+
+
       with tf.variable_scope("pooler"):
-        # We "pool" the model by simply taking the hidden state corresponding
-        # to the first token. We assume that this has been pre-trained
         first_token_tensor = tf.squeeze(self.sequence_output[:, 0:1, :], axis=1)
         self.pooled_output = tf.layers.dense(
             first_token_tensor,
@@ -244,35 +178,21 @@ class BertModel(object):
     return self.pooled_output
 
   def get_sequence_output(self):
-    """Gets final hidden layer of encoder.
-
-    Returns:
-      float Tensor of shape [batch_size, seq_length, hidden_size] corresponding
-      to the final hidden of the transformer encoder.
-    """
     return self.sequence_output
 
   def get_all_encoder_layers(self):
     return self.all_encoder_layers
 
   def get_embedding_output(self):
-    """Gets output of the embedding lookup (i.e., input to the transformer).
-
-    Returns:
-      float Tensor of shape [batch_size, seq_length, hidden_size] corresponding
-      to the output of the embedding layer, after summing the word
-      embeddings with the positional embeddings and the token type embeddings,
-      then performing layer normalization. This is the input to the transformer.
-    """
     return self.embedding_output
 
   def get_embedding_table(self):
     return self.embedding_table
 
   def get_head_embedding(self):
-      return  self.head_embeddings
+      return  self.head_embeddings,self.neg_head_embeddings
   def get_tail_embedding(self):
-      return self.tail_embeddings
+      return self.tail_embeddings,self.neg_tail_embeddings
 
 
 def gelu(x):
@@ -397,26 +317,6 @@ def embedding_lookup(input_ids,
                      initializer_range=0.02,
                      word_embedding_name="word_embeddings",
                      use_one_hot_embeddings=False):
-  """Looks up words embeddings for id tensor.
-
-  Args:
-    input_ids: int32 Tensor of shape [batch_size, seq_length] containing word
-      ids.
-    vocab_size: int. Size of the embedding vocabulary.
-    embedding_size: int. Width of the word embeddings.
-    initializer_range: float. Embedding initialization range.
-    word_embedding_name: string. Name of the embedding table.
-    use_one_hot_embeddings: bool. If True, use one-hot method for word
-      embeddings. If False, use `tf.gather()`.
-
-  Returns:
-    float Tensor of shape [batch_size, seq_length, embedding_size].
-  """
-  # This function assumes that the input is of shape [batch_size, seq_length,
-  # num_inputs].
-  #
-  # If the input is a 2D tensor of shape [batch_size, seq_length], we
-  # reshape to [batch_size, seq_length, 1].
   if input_ids.shape.ndims == 2:
     input_ids = tf.expand_dims(input_ids, axis=[-1])
 
@@ -445,33 +345,6 @@ def embedding_postprocessor(input_tensor,
                             initializer_range=0.02,
                             max_position_embeddings=512,
                             dropout_prob=0.1):
-  """Performs various post-processing on a word embedding tensor.
-
-  Args:
-    input_tensor: float Tensor of shape [batch_size, seq_length,
-      embedding_size].
-    use_token_type: bool. Whether to add embeddings for `token_type_ids`.
-    token_type_ids: (optional) int32 Tensor of shape [batch_size, seq_length].
-      Must be specified if `use_token_type` is True.
-    token_type_vocab_size: int. The vocabulary size of `token_type_ids`.
-    token_type_embedding_name: string. The name of the embedding table variable
-      for token type ids.
-    use_position_embeddings: bool. Whether to add position embeddings for the
-      position of each token in the sequence.
-    position_embedding_name: string. The name of the embedding table variable
-      for positional embeddings.
-    initializer_range: float. Range of the weight initialization.
-    max_position_embeddings: int. Maximum sequence length that might ever be
-      used with this model. This can be longer than the sequence length of
-      input_tensor, but cannot be shorter.
-    dropout_prob: float. Dropout probability applied to the final output tensor.
-
-  Returns:
-    float tensor with same shape as `input_tensor`.
-
-  Raises:
-    ValueError: One of the tensor shapes or input values is invalid.
-  """
   input_shape = get_shape_list(input_tensor, expected_rank=3)
   batch_size = input_shape[0]
   seq_length = input_shape[1]
@@ -487,22 +360,10 @@ def embedding_postprocessor(input_tensor,
           name=position_embedding_name,
           shape=[max_position_embeddings, width],
           initializer=create_initializer(initializer_range))
-      # Since the position embedding table is a learned variable, we create it
-      # using a (long) sequence length `max_position_embeddings`. The actual
-      # sequence length might be shorter than this, for faster training of
-      # tasks that do not have long sequences.
-      #
-      # So `full_position_embeddings` is effectively an embedding table
-      # for position [0, 1, 2, ..., max_position_embeddings-1], and the current
-      # sequence has positions [0, 1, 2, ... seq_length-1], so we can just
-      # perform a slice.
       position_embeddings = tf.slice(full_position_embeddings, [0, 0],
                                      [seq_length, -1])
       num_dims = len(output.shape.as_list())
 
-      # Only the last two dimensions are relevant (`seq_length` and `width`), so
-      # we broadcast among the first dimensions, which is typically just
-      # the batch size.
       position_broadcast_shape = []
       for _ in range(num_dims - 2):
         position_broadcast_shape.append(1)
@@ -516,15 +377,6 @@ def embedding_postprocessor(input_tensor,
 
 
 def create_attention_mask_from_input_mask(from_tensor, to_mask):
-  """Create 3D attention mask from a 2D tensor mask.
-
-  Args:
-    from_tensor: 2D or 3D Tensor of shape [batch_size, from_seq_length, ...].
-    to_mask: int32 Tensor of shape [batch_size, to_seq_length].
-
-  Returns:
-    float Tensor of shape [batch_size, from_seq_length, to_seq_length].
-  """
   from_shape = get_shape_list(from_tensor, expected_rank=[2, 3])
   batch_size = from_shape[0]
   from_seq_length = from_shape[1]
@@ -535,15 +387,9 @@ def create_attention_mask_from_input_mask(from_tensor, to_mask):
   to_mask = tf.cast(
       tf.reshape(to_mask, [batch_size, 1, to_seq_length]), tf.float32)
 
-  # We don't assume that `from_tensor` is a mask (although it could be). We
-  # don't actually care if we attend *from* padding tokens (only *to* padding)
-  # tokens so we create a tensor of all ones.
-  #
-  # `broadcast_ones` = [batch_size, from_seq_length, 1]
   broadcast_ones = tf.ones(
       shape=[batch_size, from_seq_length, 1], dtype=tf.float32)
 
-  # Here we broadcast along two dimensions to create the mask.
   mask = broadcast_ones * to_mask
 
   return mask
