@@ -57,6 +57,8 @@ flags.DEFINE_float(
     "The max position embedding length"
 )
 
+flags.DEFINE_integer("pos_embedding_dim",5,"the position embedding size before CNN")
+
 flags.DEFINE_bool("use_pcnn", False, "Whether to use PCNN")
 
 flags.DEFINE_bool("do_train", True, "Whether to run training.")
@@ -146,8 +148,8 @@ class InputFeatures(object):
                  input_mask,
                  head_ids,
                  tail_ids,
-                 position1_ids,
-                 position2_ids,
+                 position1,
+                 position2,
                  segment_mask,
                  label_id,
                  is_real_example=True):
@@ -155,8 +157,8 @@ class InputFeatures(object):
         self.input_mask = input_mask
         self.head_ids = head_ids
         self.tail_ids = tail_ids
-        self.position1_ids = position1_ids
-        self.position2_ids = position2_ids
+        self.position1 = position1
+        self.position2 = position2
         self.segment_mask = segment_mask
         self.label_id = label_id
         self.is_real_example = is_real_example
@@ -222,8 +224,8 @@ def model_fn_builder(
         input_mask = features["input_mask"]
         head_ids = features["head_ids"]
         tail_ids = features["tail_ids"]
-        position1_ids = features["position1_ids"]
-        position2_ids = features["position2_ids"]
+        position1 = features["position1"]
+        position2 = features["position2"]
         segment_mask = features["segment_mask"]
         label_ids = features["label_ids"]
         is_real_example = None
@@ -237,7 +239,7 @@ def model_fn_builder(
         (per_loss, total_loss, logits, probabilities) = create_model(bert_config, is_training, FLAGS.use_pcnn,
                                                                      input_ids, input_mask, head_ids, tail_ids,
                                                                      num_labels, use_one_hot_embeddings,
-                                                                     segment_mask, position1_ids, position2_ids)
+                                                                     segment_mask, position1, position2)
 
         tvars = tf.trainable_variables()
         initialized_variable_names = {}
@@ -260,12 +262,11 @@ def model_fn_builder(
 
             train_op = optimization.create_optimizer(total_loss, learning_rate, num_train_steps, num_warmup_steps,use_tpu)
 
-            output_spec = tf.contrib.tpu.TRUEstimatorSpec(
+            output_spec = tf.contrib.tpu.TPUEstimatorSpec(
                 mode=mode,
                 loss=total_loss,
                 train_op=train_op,
-                scaffold_fn=scaffold_fn
-            )
+                scaffold_fn=scaffold_fn)
         elif mode == tf.estimator.ModeKeys.EVAL:
             def metric_fn(per_example_loss, label_ids, logits, is_real_example):
                 predictions = tf.argmax(logits, axis=-1, output_type=tf.int32)
@@ -313,19 +314,16 @@ def create_model(bert_config, is_training, use_pcnn,
         input_mask=input_mask,
         head_ids=head_ids,
         tail_ids=tail_ids,
-        use_one_hot_embeddings=use_one_hot_embeddings
-    )
+        use_one_hot_embeddings=use_one_hot_embeddings)
 
     output_layer = model.get_sequence_output()
-    # output_layer = tf.concat(output_layer, tf.reshape(position1,[position1.shape[0],FLAGS.max_seq_length,1]), axis=1)
-    # output_layer = tf.concat(output_layer, tf.reshape(position2,[position2.shape[0],FLAGS.max_seq_length,1]), axis=1)
-    # word_embedding_size = output_layer.shape[-1].value
 
-    head_embedding = model.get_head_embedding()
-    tail_embedding = model.get_tail_embedding()
+    head_embedding,neg_head_embedding = model.get_head_embedding()
+    tail_embedding,neg_tail_embedding = model.get_tail_embedding()
 
-    # neg_head_embedding = tf.random_shuffle(head_embedding)
-    # neg_tail_embedding = tf.random_shuffle(tail_embedding)
+    pos_embedding = network.pos_embedding(position1, position2, pos_embedding_dim=FLAGS.pos_embedding_dim,
+                                          max_length=FLAGS.max_seq_length)
+    output_layer = tf.concat([output_layer, pos_embedding], -1)
 
     # [batch_size, hidden_size]
     sentence_embedding = tf.layers.conv1d(inputs=output_layer,
@@ -341,12 +339,8 @@ def create_model(bert_config, is_training, use_pcnn,
         return tf.reshape(sentence_embedding,[-1,bert_config.hidden_size*3])
     else:
         sentence_embedding = tf.reduce_max(sentence_embedding,axis=-2)
-    # if use_pcnn:
-    #     sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, True)
-    # else:
-    #     sentence_embedding = network.sentence_encoder(output_layer, segment_mask, bert_config.hidden_size, False)
 
-
+    # sentence_embedding = network.encoder(output_layer, segment_mask, bert_config.hidden_size, use_pcnn)
 
     output_weights = tf.get_variable("output_weights", [num_labels,bert_config.hidden_size],
                                      initializer=tf.truncated_normal_initializer(stddev=0.02))
@@ -356,13 +350,14 @@ def create_model(bert_config, is_training, use_pcnn,
     with tf.variable_scope("loss"):
         if is_training:
             sentence_embedding = tf.nn.dropout(sentence_embedding, keep_prob=0.9)
-        pos = tf.add(head_embedding,tail_embedding)
-        pos = abs(tf.add(pos,-sentence_embedding))
-        pos = tf.reduce_sum(pos, axis=1, keep_dims=True)
-        # neg = tf.reduce_sum(abs(neg_head_embedding + tail_embedding - sentence_embedding), axis=1, keep_dims=True)
+        positive = tf.add(head_embedding,tail_embedding)
+        positive = abs(tf.add(positive,-sentence_embedding))
+        positive = tf.reduce_sum(positive, axis=1, keep_dims=True)
+        negative = tf.add(neg_head_embedding,neg_tail_embedding)
+        negative = abs(tf.add(negative,-sentence_embedding))
+        negative = tf.reduce_sum(negative,axis=1,keep_dims=True)
 
-        # per_trans_loss = tf.maximum(pos - neg + FLAGS.margin, 0)
-        per_trans_loss = tf.maximum(pos + FLAGS.margin, 0)
+        per_trans_loss = tf.maximum(positive - negative + FLAGS.margin, 0)
         total_trans_loss = tf.reduce_mean(per_trans_loss)
 
         logits = tf.matmul(sentence_embedding, output_weights, transpose_b=True)
@@ -370,8 +365,6 @@ def create_model(bert_config, is_training, use_pcnn,
         probabilities = tf.nn.softmax(logits)
 
         return per_trans_loss, total_trans_loss, logits, probabilities
-
-    return per_trans_loss, total_trans_loss, sentence_embedding
 
 
 def file_based_convert_examples_to_features(
@@ -393,8 +386,8 @@ def file_based_convert_examples_to_features(
         features["input_mask"] = create_int_feature(feature.input_mask)
         features["head_ids"] = create_int_feature([feature.head_ids])
         features["tail_ids"] = create_int_feature([feature.tail_ids])
-        features['position1_ids'] = create_int_feature(feature.position1_ids)
-        features['position2_ids'] = create_int_feature(feature.position2_ids)
+        features['position1'] = create_int_feature(feature.position1)
+        features['position2'] = create_int_feature(feature.position2)
         features['segment_mask'] = create_int_feature(feature.segment_mask)
         features["label_ids"] = create_int_feature([feature.label_id])
         features["is_real_example"] = create_int_feature([int(feature.is_real_example)])
@@ -410,6 +403,7 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         label_map[label.strip()] = i
 
     tokens = tokenizer.tokenize(example.text)
+    text = example.text
     head = example.head
     tail = example.tail
     if len(tokens) > max_seq_length - 2:
@@ -427,35 +421,29 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         input_ids.append(0)
         input_mask.append(0)
 
-    def get_entity_pos(entity):
-        ids = 0
-        entity = entity.split(" ")
-        for i, word in enumerate(final_tokens):
-            if word == entity[0]:
-                ids = i
-                break
-        return ids
 
-    head_ids = get_entity_pos(head)
-    tail_ids = get_entity_pos(tail)
+    head_pos = tokenization.get_entity_pos(head) + 1
+    tail_pos = tokenization.get_entity_pos(tail) + 1
 
     segment_mask = []
-    position1_ids = []
-    position2_ids = []
+    position1 = []
+    position2 = []
+    min_pos = min(head_pos, tail_pos)
+    max_pos = max(head_pos, tail_pos)
     for i in range(len(input_ids)):
-        position1_ids.append(i - head_ids + max_seq_length)
-        position2_ids.append(i - tail_ids + max_seq_length)
-        if i <= min(head_ids, tail_ids):
-            segment_mask.append(0)
-        elif i < max(head_ids, tail_ids):
+        position1.append(i - head_pos + max_seq_length)
+        position2.append(i - tail_pos + max_seq_length)
+        if i <= min_pos:
             segment_mask.append(1)
-        else:
+        elif i < max_pos:
             segment_mask.append(2)
+        else:
+            segment_mask.append(3)
 
     assert len(input_ids) == max_seq_length
     assert len(input_mask) == max_seq_length
-    assert len(position1_ids) == max_seq_length
-    assert len(position2_ids) == max_seq_length
+    assert len(position1) == max_seq_length
+    assert len(position2) == max_seq_length
     assert len(segment_mask) == max_seq_length
 
     if example.label.strip() in label_map.keys():
@@ -469,17 +457,17 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
             [tokenization.printable_text(x) for x in tokens]))
         tf.logging.info("input_ids: %s" % " ".join([str(x) for x in input_ids]))
         tf.logging.info("input_mask: %s" % " ".join((str(x) for x in input_mask)))
-        tf.logging.info("position1_ids: %s" % " ".join([str(x) for x in position1_ids]))
-        tf.logging.info("position2_ids: %s" % " ".join([str(x) for x in position2_ids]))
+        tf.logging.info("position1: %s" % " ".join([str(x) for x in position1]))
+        tf.logging.info("position2: %s" % " ".join([str(x) for x in position2]))
         tf.logging.info("segment_mask: %s" % " ".join(([str(x) for x in segment_mask])))
         tf.logging.info("label: %s (id = %d)" % (example.label, label_id))
     feature = InputFeatures(
         input_ids=input_ids,
         input_mask=input_mask,
-        head_ids=head_ids,
-        tail_ids=tail_ids,
-        position1_ids=position1_ids,
-        position2_ids=position2_ids,
+        head_ids=head_pos,
+        tail_ids=tail_pos,
+        position1=position1,
+        position2=position2,
         segment_mask=segment_mask,
         label_id=label_id,
         is_real_example=True)
@@ -492,8 +480,8 @@ def file_based_input_fn_builder(input_file, seq_length, is_training, drop_remain
         "input_mask": tf.FixedLenFeature([seq_length], tf.int64),
         "head_ids": tf.FixedLenFeature([1], tf.int64),
         "tail_ids": tf.FixedLenFeature([1], tf.int64),
-        "position1_ids": tf.FixedLenFeature([seq_length], tf.int64),
-        "position2_ids": tf.FixedLenFeature([seq_length], tf.int64),
+        "position1": tf.FixedLenFeature([seq_length], tf.int64),
+        "position2": tf.FixedLenFeature([seq_length], tf.int64),
         "segment_mask": tf.FixedLenFeature([seq_length], tf.int64),
         "label_ids": tf.FixedLenFeature([], tf.int64),
         "is_real_example": tf.FixedLenFeature([], tf.int64),
@@ -600,8 +588,8 @@ def main(_):
 
     if FLAGS.do_train:
         train_file = os.path.join(FLAGS.data_dir, "train.tf_record")
-        # file_based_convert_examples_to_features(
-        #     train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
+        file_based_convert_examples_to_features(
+            train_examples, label_list, FLAGS.max_seq_length, tokenizer, train_file)
         tf.logging.info("***** Running training *****")
         tf.logging.info("  Num examples = %d", len(train_examples))
         tf.logging.info("  Batch size = %d", FLAGS.train_batch_size)
