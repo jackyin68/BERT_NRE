@@ -422,8 +422,8 @@ def convert_single_example(ex_index, example, label_list, max_seq_length, tokeni
         input_mask.append(0)
 
 
-    head_pos = tokenization.get_entity_pos(head) + 1
-    tail_pos = tokenization.get_entity_pos(tail) + 1
+    head_pos = tokenization.get_entity_pos(head,text) + 1
+    tail_pos = tokenization.get_entity_pos(tail,text) + 1
 
     segment_mask = []
     position1 = []
