@@ -80,6 +80,6 @@ if __name__ == '__main__':
         if rel not in relations:
             relations.append(rel)
     with open(os.path.join(DATA_DIR, "rel2id.txt"), 'w') as f:
-        for r in rel:
+        for r in relations:
             f.write(r + "\n")
     f.close()
